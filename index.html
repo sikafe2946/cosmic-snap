@@ -382,6 +382,9 @@
     box-shadow: 0 3px 8px rgba(0,0,0,0.75);
   }
   .board-card.you-card { border-color: #38bdf8; }
+  .board-card.activate-ready { box-shadow: 0 0 10px rgba(0, 229, 255, 0.65); }
+  .board-card.activate-pending { border-color: var(--gold) !important; box-shadow: 0 0 14px var(--gold-glow); }
+  .hex-action-btn.activate { background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #1a0f00; box-shadow: 0 0 18px rgba(251, 191, 36, 0.65); }
   .board-card.cpu-card { border-color: #f87171; }
   .board-card.face-down {
     background: repeating-linear-gradient(45deg, #1e1b4b, #1e1b4b 5px, #312e81 5px, #312e81 10px);
@@ -1454,6 +1457,7 @@ const TOKENS_DB = {
   widows_bite: { id: 'widows_bite', name: 'ウィドウズバイト', cost: 0, power: -1, kw: 'special', kwLabel: '特殊', desc: '【特殊】手札にある間、カードを引けない。', isToken: true },
   aurora_hawk: { id: 'aurora_hawk', name: '鷹のオーロラ', cost: 3, power: 3, kw: 'onReveal', kwLabel: '公開時', desc: '【公開時】次のターン終了時まで全ロケーションの効果を無効化。', isToken: true },
   aurora_bear: { id: 'aurora_bear', name: '熊のオーロラ', cost: 3, power: 3, kw: 'onReveal', kwLabel: '公開時', desc: '【公開時】このロケーションの効果を再発動。', isToken: true },
+  zombie_horde: { id: 'zombie_horde', name: 'ゾンビの群れ', cost: 1, power: 0, kw: 'none', kwLabel: '大群', desc: '大群効果で生成・強化されるゾンビの群れ。', isToken: true },
 };
 
 const LOCATIONS_DB = [
@@ -2491,6 +2495,11 @@ function makeCardInstance(defId, owner, created = false) {
     negasonicUsed: false,
     rescueActive: false,
     herculesUsedTurn: 0,
+    activatedUsed: false,
+    copiedActivateId: null,
+    herbieMode: 0,
+    thingFsUsed: false,
+    phoenixMovable: false,
   };
 }
 
@@ -2563,14 +2572,20 @@ function startNewMatch(mode = 'cpu', mpInit = null) {
         energy: 1, maxEnergy: 1, bonusMaxEnergy: 0, nextTurnEnergy: 0, lastTurnUnspent: 0,
         zeroPending: false, shuriPending: [0, 0, 0], rescuePending: [0, 0, 0],
         lastPlayedUid: null, waveThisTurn: false, playedThisTurnCount: 0,
-        pendingPlays: [], pendingMoves: [], pendingActivates: [], turnReady: false, committedPlays: null,
+        destroyedCount: 0, destroyedLocs: [false, false, false],
+        iwFsActive: false, kidOmegaPendingUid: null, maverickBonus: 0, aranaPending: false,
+        blackSwanUntilTurn: 0, lastMovedUid: null, lastMovedFromIdx: -1,
+        pendingPlays: [], pendingMoves: [], pendingActivates: [], turnReady: false, committedPlays: null, committedActivates: null,
       },
       cpu: {
         deck: cpuDeck, hand: [], discarded: [],
         energy: 1, maxEnergy: 1, bonusMaxEnergy: 0, nextTurnEnergy: 0, lastTurnUnspent: 0,
         zeroPending: false, shuriPending: [0, 0, 0], rescuePending: [0, 0, 0],
         lastPlayedUid: null, waveThisTurn: false, playedThisTurnCount: 0,
-        pendingPlays: [], pendingMoves: [], pendingActivates: [], turnReady: false, committedPlays: null,
+        destroyedCount: 0, destroyedLocs: [false, false, false],
+        iwFsActive: false, kidOmegaPendingUid: null, maverickBonus: 0, aranaPending: false,
+        blackSwanUntilTurn: 0, lastMovedUid: null, lastMovedFromIdx: -1,
+        pendingPlays: [], pendingMoves: [], pendingActivates: [], turnReady: false, committedPlays: null, committedActivates: null,
       }
     },
     lastCpuPlayedUid: null,
@@ -2626,6 +2641,8 @@ function beginTurn(turnNum) {
     p.pendingActivates = [];
     p.turnReady = false;
     p.committedPlays = null;
+    p.committedActivates = null;
+    p.iwFsActive = false;
     p.turnBonusEnergy = 0;
     p.turnEnergyGranted = false;
   });
@@ -2811,6 +2828,7 @@ function getEffectiveCost(card, side) {
   if (card.mordoCost6 && G.turn <= 6) cost = 6;
   if (G.players[side].waveThisTurn) cost = 4;
   if (card.beastDiscountTurn === G.turn) cost = Math.max(0, cost - 1);
+  if ((G.players[side].blackSwanUntilTurn || 0) >= G.turn && card.cost === 1) cost = 0;
   if (card.id === 'death' && !card.silenced) cost = Math.max(0, cost - G.totalDestroyed);
   if (card.id === 'she_hulk' && !card.silenced) cost = Math.max(0, cost - G.players[side].lastTurnUnspent);
   if (card.id === 'miles_morales' && !card.silenced && G.cardMovedLastTurn) cost = Math.min(cost, 1);
@@ -2966,6 +2984,8 @@ function getCardCurrentPower(card, locIdx, includeCerebro = true) {
     }
     if (effId === 'devil_dinosaur') mod += G.players[side].hand.length * 2 * citadel;
     if (effId === 'morbius') mod += G.players[side].discarded.length * 2 * citadel;
+    if (effId === 'wild_child') mod += (G.players[side].discarded.length + (G.players[side].destroyedCount || 0)) * 4 * citadel;
+    if (effId === 'muse') mod += (G.players[side].destroyedLocs || [false, false, false]).filter(Boolean).length * 3 * citadel;
     if (effId === 'ant_man' && G.board[locIdx][side].filter(x => x.revealed).length >= 4) mod += 4 * citadel;
     if (effId === 'namor' && G.board[locIdx][side].filter(x => x.revealed).length === 1) mod += 5 * citadel;
     if (effId === 'lizard' && G.board[locIdx][opp].filter(x => x.revealed).length >= 4) mod -= 4 * citadel;
@@ -3199,7 +3219,7 @@ async function resolveTurn() {
       const c = G.board[p.locIdx].you.find(x => x.uid === p.uid);
       return c ? { locIdx: p.locIdx, uid: c.uid, id: c.id, paidCost: c.paidCost ?? c.cost, basePower: c.basePower, permPowerMod: c.permPowerMod } : null;
     }).filter(Boolean);
-    sendRoomMsg({ type: 'turn_commit', turn: G.turn, plays: playsPayload });
+    sendRoomMsg({ type: 'turn_commit', turn: G.turn, plays: playsPayload, activates: G.players.you.pendingActivates });
     if (!G.players.cpu.turnReady) {
       addLog(`⏳ ${G.oppName} のターン終了を待っています（ボタンでキャンセル可）`, 'sys');
       renderBattle();
@@ -3257,6 +3277,10 @@ async function executeResolveTurn() {
       opp.pendingPlays.push({ uid: card.uid, locIdx: p.locIdx });
     });
     G.players.cpu.committedPlays = null;
+    if (Array.isArray(G.players.cpu.committedActivates)) {
+      G.players.cpu.pendingActivates = G.players.cpu.committedActivates;
+      G.players.cpu.committedActivates = null;
+    }
   }
 
   G.phase = 'resolving';
@@ -3288,7 +3312,20 @@ async function executeResolveTurn() {
       }
     }
 
-    // 2. 同一プレイヤー内: カードプレイと有効化を操作順に解決
+    // 1.5. 同一プレイヤー内: 有効化予約を解決
+    const acts = [...(G.players[side].pendingActivates || [])];
+    for (const act of acts) {
+      const card = findBoardCardByUid(act.uid);
+      if (!card || card.owner !== side || !card.revealed || card.silenced || card.activatedUsed) continue;
+      const locIdx = findBoardLocIdx(act.uid);
+      card.activatedUsed = true;
+      addLog(`⚡ ${side === 'you' ? 'YOU' : G.oppName}「${card.name}」有効化発動！`, side);
+      triggerActivate(card, locIdx);
+      renderBattle(card.uid);
+      await sleep(750);
+    }
+
+    // 2. 同一プレイヤー内: カードプレイを操作順に解決
     const plays = [...G.players[side].pendingPlays];
     for (const play of plays) {
       const card = findBoardCardByUid(play.uid);
@@ -3372,9 +3409,44 @@ async function executeResolveTurn() {
       addLog(`💚 ブルース・バナーがハルクに変身！`, side);
     } else if (c.id === 'thena' && G.players[side].playedThisTurnCount === 2) {
       c.permPowerMod += 3; addLog(`⚔️ セナ: 2枚プレイでパワー+3！`, side);
+    } else if (c.id === 'hellcow_ff') {
+      ['you', 'cpu'].forEach(s => G.board[i][s].forEach(x => { if (x.uid !== c.uid && x.revealed) x.permPowerMod -= 1; }));
+      [...G.board[i][side]].forEach(x => { if (x.uid !== c.uid && x.revealed && getCardCurrentPower(x, i, true) <= 0) destroyCard(x, i, 'ヘルカウ：FF'); });
+    } else if (c.id === 'thing_fs') {
+      c.permPowerMod += 2;
+      if (!c.thingFsUsed && G.board[i][side].length >= 4) {
+        c.thingFsUsed = true;
+        const myP = getCardCurrentPower(c, i, true);
+        const lowEnemies = G.board[i][opp].filter(x => x.revealed && getCardCurrentPower(x, i, true) < myP);
+        if (lowEnemies.length > 0) destroyCard(lowEnemies[Math.floor(Math.random() * lowEnemies.length)], i, 'ザ・シング：FS');
+      }
+    } else if (c.id === 'zombie_power_man') {
+      if (getLocationTotalPower(i, side) > getLocationTotalPower(i, opp) && G.players[side].hand.length > 0) {
+        discardCardObj(G.players[side].hand[0], side, 'ゾンビパワーマン');
+      }
+    } else if (c.id === 'zombie_blade') {
+      if (G.players[opp].hand.length > 0) {
+        const tgt = G.players[opp].hand[Math.floor(Math.random() * G.players[opp].hand.length)];
+        tgt.permPowerMod -= 1; c.permPowerMod += 1;
+      }
     } else if (c.id === 'makkari') {
       // handled in hand loop below
     }
+  }
+
+  // インビジブル・ウーマン：FS のターン終了時効果2回発動
+  for (const side of order) {
+    if (!G.players[side].iwFsActive) continue;
+    for (const { card: c, locIdx: i, side: cs } of getAllBoardCardsInLandedOrder()) {
+      if (cs !== side || !c.revealed || c.silenced) continue;
+      const opp = side === 'you' ? 'cpu' : 'you';
+      if (c.id === 'sunspot' && G.players[side].energy > 0) c.permPowerMod += G.players[side].energy;
+      else if (c.id === 'nebula' && c.playedTurn < G.turn && !G.board[i][opp].some(oc => oc.playedTurn === G.turn)) c.permPowerMod += 2;
+      else if (c.id === 'thena' && G.players[side].playedThisTurnCount === 2) c.permPowerMod += 3;
+      else if (c.id === 'adam_warlock') { if (getLocationTotalPower(i, side) > getLocationTotalPower(i, opp)) drawCard(side); else c.permPowerMod += 1; }
+      else if (c.id === 'thing_fs') c.permPowerMod += 2;
+    }
+    addLog(`🌀 インビジブル・ウーマン：FS でターン終了時効果が再発動！`, side);
   }
 
   // 5〜6. 先攻側の手札（左→右）→ 後攻側の手札（左→右）
@@ -3437,6 +3509,38 @@ async function revealSingleCard(card, locIdx, skipPlayLocEffects = false) {
     for (let t = 0; t < times; t++) card.permPowerMod += Math.max(0, card.basePower + card.permPowerMod);
     addLog(`🐆 シュリ: 「${card.name}」のパワー倍増！`, side);
   }
+
+  if (p.maverickBonus > 0) {
+    card.permPowerMod += p.maverickBonus;
+    addLog(`🎖️ マーヴェリック: 「${card.name}」にパワー+${p.maverickBonus}！`, side);
+    p.maverickBonus = 0;
+  }
+
+  if (p.aranaPending) {
+    p.aranaPending = false;
+    card.permPowerMod += 1;
+    if (locIdx < 2 && G.board[locIdx + 1][side].length < 4) moveCard(card, locIdx, locIdx + 1);
+    addLog(`🕷️ アラーニャ: 「${card.name}」にパワー+1＆右へ移動！`, side);
+  }
+
+  if (p.kidOmegaPendingUid) {
+    const ko = findBoardCardByUid(p.kidOmegaPendingUid);
+    p.kidOmegaPendingUid = null;
+    if (ko && ko.uid !== card.uid) {
+      const gained = Math.max(0, getCardCurrentPower(card, findBoardLocIdx(card.uid), true));
+      if (destroyCard(card, findBoardLocIdx(card.uid), 'キッド・オメガ')) {
+        ko.permPowerMod += gained;
+        addLog(`🧠 キッド・オメガ: 「${card.name}」を破壊しパワー+${gained}！`, side);
+      }
+    }
+  }
+
+  // ゾンビスカーレット・ウィッチ: ここにカードをプレイした後、大群+2
+  G.board[locIdx][side].forEach(zc => {
+    if (zc.uid !== card.uid && zc.revealed && !zc.silenced && zc.id === 'zombie_scarlet_witch') {
+      addHorde(side, 2, locIdx);
+    }
+  });
 
   if (!card.isToken) p.lastPlayedUid = card.uid;
 
@@ -4130,6 +4234,496 @@ function triggerOnReveal(card, locIdx, isCopy) {
           if (c.uid !== card.uid && c.revealed) { c.permPowerMod -= 1; card.permPowerMod += 1; }
         }));
         break;
+      case 'elektra': {
+        const c1s = G.board[locIdx][opp].filter(c => c.revealed && c.cost === 1);
+        if (c1s.length > 0) destroyCard(c1s[Math.floor(Math.random() * c1s.length)], locIdx, 'エレクトラ');
+        break;
+      }
+      case 'fastball_special': {
+        const allies = G.board[locIdx][side].filter(c => c.uid !== card.uid && c.revealed);
+        if (allies.length > 0) {
+          allies.sort((a, b) => getCardCurrentPower(b, locIdx, true) - getCardCurrentPower(a, locIdx, true));
+          const sac = allies[0];
+          const sacP = Math.max(0, getCardCurrentPower(sac, locIdx, true));
+          if (destroyCard(sac, locIdx, 'ファストボール・S') && G.board[locIdx][opp].length > 0) {
+            const enemies = G.board[locIdx][opp].filter(c => c.revealed);
+            if (enemies.length > 0) {
+              enemies[Math.floor(Math.random() * enemies.length)].permPowerMod -= sacP;
+              addLog(`⚾ ファストボール・S: 敵のパワー-${sacP}！`, side);
+            }
+          }
+        }
+        break;
+      }
+      case 'tombstone':
+        for (let i = 0; i < 3; i++) {
+          if (i === locIdx) continue;
+          const allies = G.board[i][side].filter(c => c.revealed);
+          if (allies.length > 0) {
+            allies.sort((a, b) => getCardCurrentPower(a, i, true) - getCardCurrentPower(b, i, true));
+            destroyCard(allies[0], i, 'トゥームストーン');
+          }
+        }
+        break;
+      case 'cannonball': {
+        const enemies = G.board[locIdx][opp].filter(c => c.revealed);
+        if (enemies.length > 0) {
+          enemies.sort((a, b) => getCardCurrentPower(b, locIdx, true) - getCardCurrentPower(a, locIdx, true));
+          const tgt = enemies[0];
+          const others = [0, 1, 2].filter(i => i !== locIdx && G.board[i][opp].length < 4);
+          if (others.length > 0) {
+            moveCard(tgt, locIdx, others[Math.floor(Math.random() * others.length)]);
+          } else if (destroyCard(tgt, locIdx, 'キャノンボール')) {
+            const rk = makeCardInstance('rock', opp, true); rk.revealed = true; stampLanded(rk);
+            G.board[locIdx][opp].push(rk);
+          }
+        }
+        break;
+      }
+      case 'misery': {
+        const allies = G.board[locIdx][side].filter(c => c.uid !== card.uid && c.revealed);
+        for (const a of allies) {
+          if (a.kw.includes('onReveal')) triggerOnReveal(a, locIdx, true);
+          destroyCard(a, locIdx, 'ミザリー');
+        }
+        break;
+      }
+      case 'annihilus':
+        for (let i = 0; i < 3; i++) {
+          [...G.board[i][side]].filter(c => c.uid !== card.uid && c.revealed && getCardCurrentPower(c, i, true) < 0).forEach(c => {
+            if (G.board[i][opp].length < 4) {
+              G.board[i][side] = G.board[i][side].filter(x => x.uid !== c.uid);
+              c.owner = opp; G.board[i][opp].push(c);
+              addLog(`🦟 アニヒラス: 「${c.name}」を相手サイドへ送った！`, side);
+            } else {
+              destroyCard(c, i, 'アニヒラス');
+            }
+          });
+        }
+        break;
+      case 'phoenix_force': {
+        const pool = G.destroyedPool.filter(x => x.owner === side);
+        if (pool.length > 0 && G.board[locIdx][side].length < 4) {
+          const pk = pool[Math.floor(Math.random() * pool.length)];
+          const rev = makeCardInstance(pk.id, side, true);
+          rev.basePower = Math.max(rev.basePower, pk.powerAtDestroy) + 5;
+          rev.revealed = true; rev.phoenixMovable = true; stampLanded(rev);
+          G.board[locIdx][side].push(rev);
+          addLog(`🔥 フェニックス・フォース: 「${rev.name}」を+5＆移動可能で復活！`, side);
+        }
+        break;
+      }
+      case 'firelord': {
+        const pool = [
+          ...G.destroyedPool.filter(x => x.owner === side && x.cost === 3).map(x => ({ src: 'destroy', item: x })),
+          ...p.discarded.filter(x => x.cost === 3).map(x => ({ src: 'discard', item: x }))
+        ];
+        if (pool.length > 0 && G.board[locIdx][side].length < 4) {
+          const pk = pool[Math.floor(Math.random() * pool.length)];
+          const rev = makeCardInstance(pk.item.id, side, true); rev.revealed = true; stampLanded(rev);
+          G.board[locIdx][side].push(rev);
+          addLog(`🔥 ファイアロード: 「${rev.name}」を復活！`, side);
+        }
+        break;
+      }
+      case 'adamantium': {
+        const pool = G.destroyedPool.filter(x => x.owner === side);
+        if (pool.length > 0 && G.board[locIdx][side].length < 4) {
+          pool.sort((a, b) => b.powerAtDestroy - a.powerAtDestroy);
+          const pk = pool[0];
+          const rev = makeCardInstance(pk.id, side, true);
+          rev.basePower = Math.max(0, pk.powerAtDestroy) * 2;
+          rev.revealed = true; stampLanded(rev);
+          G.board[locIdx][side].push(rev);
+          addLog(`🦾 アダマンチウム: 「${rev.name}」を倍パワー(${rev.basePower})で復活！`, side);
+        }
+        break;
+      }
+      case 'death_ff': {
+        const pool = G.destroyedPool.filter(x => x.owner === side);
+        pool.forEach(pk => {
+          const open = [0, 1, 2].filter(i => G.board[i][side].length < 4);
+          if (open.length > 0) {
+            const rev = makeCardInstance(pk.id, side, true); rev.revealed = true; stampLanded(rev);
+            G.board[open[Math.floor(Math.random() * open.length)]][side].push(rev);
+          }
+        });
+        if (pool.length > 0) addLog(`💀 デス：FF: 破壊された味方${pool.length}枚を復活！`, side);
+        break;
+      }
+      case 'elixir': {
+        const pool = G.destroyedPool.filter(x => x.owner === side && x.destroyedTurn === G.turn - 1);
+        const fallback = pool.length > 0 ? pool : G.destroyedPool.filter(x => x.owner === side);
+        if (fallback.length > 0 && G.board[locIdx][side].length < 4) {
+          const pk = fallback[Math.floor(Math.random() * fallback.length)];
+          const rev = makeCardInstance(pk.id, side, true); rev.revealed = true; stampLanded(rev);
+          G.board[locIdx][side].push(rev);
+          addLog(`🧪 エリクサー: 「${rev.name}」を復活！`, side);
+        }
+        break;
+      }
+      case 'morgan_le_fay': {
+        const list = [...G.destroyedPool.filter(x => x.owner === side), ...p.discarded];
+        let cnt = 0;
+        list.forEach(item => {
+          if (p.hand.length < 7) {
+            const c = makeCardInstance(item.id, side, true);
+            c.permPowerMod += 3;
+            p.hand.push(c);
+            cnt++;
+          }
+        });
+        if (cnt > 0) addLog(`🔮 モーガン・ル・フェイ: ${cnt}枚を+3して手札に戻した！`, side);
+        break;
+      }
+      case 'hunger':
+        addHorde(side, 3, locIdx);
+        break;
+      case 'zombie_nova':
+        addHorde(side, 3, locIdx);
+        break;
+      case 'zombie_sentry': {
+        if (locIdx < 2) {
+          const cnt = G.board[locIdx + 1][side].filter(c => c.revealed).length;
+          if (cnt > 0) addHorde(side, cnt, locIdx);
+        }
+        break;
+      }
+      case 'zombie_mr_fantastic':
+        addHorde(side, 2, locIdx);
+        break;
+      case 'zombie_giant_man': {
+        addHorde(side, 2, locIdx);
+        let hordePow = 0;
+        for (let i = 0; i < 3; i++) G.board[i][side].forEach(zc => { if (zc.id === 'zombie_horde' && zc.revealed) hordePow += getCardCurrentPower(zc, i, true); });
+        card.permPowerMod += hordePow;
+        addLog(`🧟 ゾンビジャイアントマン: 大群パワー+${hordePow}を得た！`, side);
+        break;
+      }
+      case 'zombie_venom': {
+        const allies = G.board[locIdx][side].filter(c => c.uid !== card.uid && c.revealed);
+        if (allies.length > 0) {
+          const target = allies[allies.length - 1];
+          if (destroyCard(target, locIdx, 'ゾンビヴェノム')) addHorde(side, 3, locIdx);
+        }
+        break;
+      }
+      case 'super_adaptoid': {
+        const enemyAct = G.board[locIdx][opp].find(c => c.revealed && !c.silenced && hasActivateAbility(c));
+        if (enemyAct) {
+          card.copiedActivateId = enemyAct.copiedActivateId || enemyAct.id;
+          card.kwLabel = '有効化(奪取)';
+          enemyAct.silenced = true;
+          addLog(`🤖 スーパーアダプトイド: 「${enemyAct.name}」の有効化能力を奪取！`, side);
+        }
+        break;
+      }
+    }
+  }
+}
+
+function addHorde(side, amount, avoidLocIdx = -1) {
+  if (!G || amount <= 0) return null;
+  for (let i = 0; i < 3; i++) {
+    const existing = G.board[i][side].find(c => c.id === 'zombie_horde' && c.revealed);
+    if (existing) {
+      existing.permPowerMod += amount;
+      playSfx('buff');
+      addLog(`🧟 ゾンビの群れがパワー+${amount}！`, side);
+      spawnVfx('buff', `[data-loc-drop="${i}"]`, `🧟 +${amount}`);
+      return existing;
+    }
+  }
+  const others = [0, 1, 2].filter(i => i !== avoidLocIdx && G.board[i][side].length < 4);
+  const pool = others.length > 0 ? others : [0, 1, 2].filter(i => G.board[i][side].length < 4);
+  if (pool.length === 0) {
+    addLog(`⚠️ 空きロケーションがなくゾンビの群れを生成できない！`, side);
+    return null;
+  }
+  const targetLoc = pool[Math.floor(Math.random() * pool.length)];
+  const z = makeCardInstance('zombie_horde', side, true);
+  z.revealed = true;
+  z.permPowerMod = amount;
+  stampLanded(z);
+  G.board[targetLoc][side].push(z);
+  playSfx('buff');
+  addLog(`🧟 ${G.locations[targetLoc].name}に「ゾンビの群れ(1/${amount})」を生成！`, side);
+  spawnVfx('buff', `[data-loc-drop="${targetLoc}"]`, `🧟 ゾンビ生成 +${amount}`);
+  return z;
+}
+
+function hasActivateAbility(card) {
+  if (!card || card.silenced) return false;
+  if (card.copiedActivateId) return true;
+  return (card.kwLabel && card.kwLabel.includes('有効化')) || (card.desc && card.desc.includes('【有効化】'));
+}
+
+function canActivateCard(card, side = 'you') {
+  if (!G || G.phase !== 'planning') return false;
+  if (side === 'you' && G.players.you.turnReady) return false;
+  if (!card || card.owner !== side || !card.revealed || card.silenced) return false;
+  if (!hasActivateAbility(card)) return false;
+  if (card.activatedUsed) return false;
+  return true;
+}
+
+function toggleActivateCard(uid) {
+  if (!G || G.phase !== 'planning' || G.players.you.turnReady) return;
+  const card = findBoardCardByUid(uid);
+  if (!canActivateCard(card, 'you')) return;
+  const p = G.players.you;
+  const idx = p.pendingActivates.findIndex(a => a.uid === uid);
+  if (idx !== -1) {
+    p.pendingActivates.splice(idx, 1);
+    playSfx('place');
+    addLog(`↩️ 「${card.name}」の有効化を取り消しました。`, 'you');
+  } else {
+    p.pendingActivates.push({ uid, locIdx: findBoardLocIdx(uid) });
+    playSfx('buff');
+    addLog(`⚡ 「${card.name}」の有効化を予約しました！`, 'you');
+    spawnVfx('buff', `[data-loc-drop="${findBoardLocIdx(uid)}"]`, `⚡ 有効化予約`);
+  }
+  closeModal();
+  renderBattle();
+}
+
+function triggerActivate(card, locIdx) {
+  if (!card || card.silenced) return;
+  const side = card.owner;
+  const opp = side === 'you' ? 'cpu' : 'you';
+  const p = G.players[side];
+  const effId = card.copiedActivateId || card.id;
+  playSfx('buff');
+  spawnVfx('buff', `[data-loc-drop="${locIdx}"]`, `⚡ ${card.name}`);
+
+  switch (effId) {
+    case 'king_eitri': {
+      const ci = p.deck.findIndex(c => c.created);
+      if (ci !== -1 && p.hand.length < 7) {
+        p.hand.push(p.deck.splice(ci, 1)[0]);
+        addLog(`🔨 キング・エイトリ: 作成カードを引いた！`, side);
+      } else {
+        drawCard(side);
+      }
+      break;
+    }
+    case 'child_of_askani': {
+      const open = [0, 1, 2].filter(i => i !== locIdx && G.board[i][side].length < 4);
+      const c1 = CARDS_DB.filter(c => c.cost === 1);
+      if (open.length > 0 && c1.length > 0) {
+        const dest = open[Math.floor(Math.random() * open.length)];
+        const nc = makeCardInstance(c1[Math.floor(Math.random() * c1.length)].id, side, true);
+        nc.revealed = true; stampLanded(nc);
+        G.board[dest][side].push(nc);
+        triggerOnReveal(nc, dest, true);
+        addLog(`✨ アスカニの子: 「${nc.name}」を作成！`, side);
+      }
+      break;
+    }
+    case 'awesome_andy':
+      for (let i = 0; i < 3; i++) {
+        if (i === locIdx) continue;
+        const allies = G.board[i][side].filter(c => c.revealed);
+        if (allies.length > 0) allies[Math.floor(Math.random() * allies.length)].permPowerMod += 2;
+      }
+      addLog(`🤖 オーサム・アンディ: 他ロケーションの味方に+2！`, side);
+      break;
+    case 'cobra': {
+      const createdEnemies = G.board[locIdx][opp].filter(c => c.revealed && c.created);
+      if (createdEnemies.length > 0) destroyCard(createdEnemies[Math.floor(Math.random() * createdEnemies.length)], locIdx, 'コブラ');
+      break;
+    }
+    case 'danger': {
+      const myP = getCardCurrentPower(card, locIdx, true);
+      const lowEnemies = G.board[locIdx][opp].filter(c => c.revealed && getCardCurrentPower(c, locIdx, true) < myP);
+      if (lowEnemies.length > 0) destroyCard(lowEnemies[Math.floor(Math.random() * lowEnemies.length)], locIdx, 'デンジャー');
+      break;
+    }
+    case 'fan_fei':
+      G.board[locIdx][side].forEach(c => { if (c.uid !== card.uid && c.revealed) c.permPowerMod += 1; });
+      if (locIdx < 2 && G.board[locIdx + 1][side].length < 4) moveCard(card, locIdx, locIdx + 1);
+      break;
+    case 'fantastichar':
+      for (let i = 0; i < 3; i++) G.board[i][side].forEach(c => { if (c.revealed && c.kwLabel === 'ターン終了時') c.permPowerMod += 2; });
+      addLog(`🤖 ファンタスティッカー: ターン終了時カードに+2！`, side);
+      break;
+    case 'jennifer_kale':
+      p.nextTurnEnergy += 1;
+      addLog(`✨ ジェニファー・ケイル: 次ターンエネルギー+1！`, side);
+      break;
+    case 'omega_sentinel': {
+      const enemies = [];
+      for (let i = 0; i < 3; i++) G.board[i][opp].forEach(c => { if (c.revealed) enemies.push({ c, i }); });
+      if (enemies.length > 0) {
+        enemies.sort((a, b) => getCardCurrentPower(b.c, b.i, true) - getCardCurrentPower(a.c, a.i, true));
+        enemies[0].c.permPowerMod -= 7;
+        addLog(`💠 オメガ・センチネル: 「${enemies[0].c.name}」のパワー-7！`, side);
+      }
+      break;
+    }
+    case 'lasher': {
+      const enemies = G.board[locIdx][opp].filter(c => c.revealed);
+      if (enemies.length > 0) {
+        const myP = Math.max(0, getCardCurrentPower(card, locIdx, true));
+        const tgt = enemies[Math.floor(Math.random() * enemies.length)];
+        tgt.permPowerMod -= myP;
+        addLog(`🧬 ラッシャー: 「${tgt.name}」のパワー-${myP}！`, side);
+      }
+      break;
+    }
+    case 'zombie_captain_marvel': {
+      let eaten = 0;
+      G.board[locIdx][side].filter(c => c.uid !== card.uid && c.revealed).forEach(c => {
+        if (destroyCard(c, locIdx, 'ゾンビCM')) eaten++;
+      });
+      card.permPowerMod += eaten * 3;
+      const strictlyLosing = [0, 1, 2].filter(i => i !== locIdx && G.board[i][side].length < 4 && getLocationTotalPower(i, side) < getLocationTotalPower(i, opp));
+      const losing = strictlyLosing.length > 0 ? strictlyLosing : [0, 1, 2].filter(i => i !== locIdx && G.board[i][side].length < 4 && getLocationTotalPower(i, side) <= getLocationTotalPower(i, opp));
+      if (losing.length > 0) moveCard(card, locIdx, losing[Math.floor(Math.random() * losing.length)]);
+      break;
+    }
+    case 'zombie_mr_fantastic': {
+      const targets = [...p.hand.filter(c => c.created)];
+      for (let i = 0; i < 3; i++) G.board[i][side].forEach(c => { if (c.revealed && c.created) targets.push(c); });
+      targets.slice(0, 4).forEach(t => { t.permPowerMod += 1; });
+      addLog(`🧟 ゾンビMr.F: 作成カード${Math.min(4, targets.length)}枚に+1！`, side);
+      break;
+    }
+    case 'symbiote_spider_man': {
+      const allies = G.board[locIdx][side].filter(c => c.uid !== card.uid && c.revealed);
+      if (allies.length > 0) {
+        allies.sort((a, b) => a.cost - b.cost);
+        const tgt = allies[0];
+        const addP = getCardCurrentPower(tgt, locIdx, false);
+        G.board[locIdx][side] = G.board[locIdx][side].filter(c => c.uid !== tgt.uid);
+        card.permPowerMod += addP;
+        if (tgt.kw.includes('ongoing')) { card.copiedOngoingId = tgt.copiedOngoingId || tgt.id; card.kw = 'ongoing'; }
+        if (tgt.kw.includes('onReveal')) { card.copiedOnRevealId = tgt.copiedOnRevealId || tgt.id; card.kw = 'onReveal'; triggerOnReveal(card, locIdx, true); }
+        addLog(`🕷️ シンビオートSM: 「${tgt.name}」と融合(+${addP})！`, side);
+      }
+      break;
+    }
+    case 'invisible_woman_fs':
+      p.iwFsActive = true;
+      addLog(`🛡️ IW：FS: このターンのターン終了時効果が2回発動！`, side);
+      break;
+    case 'bullseye': {
+      const lowHand = p.hand.filter(c => getEffectiveCost(c, side) <= 1);
+      let cnt = 0;
+      lowHand.forEach(hc => { discardCardObj(hc, side, 'ブルズアイ'); cnt++; });
+      if (cnt > 0) {
+        const enemies = [];
+        for (let i = 0; i < 3; i++) G.board[i][opp].forEach(c => { if (c.revealed) enemies.push(c); });
+        shuffle(enemies).slice(0, cnt).forEach(e => { e.permPowerMod -= 2; });
+        addLog(`🎯 ブルズアイ: ${cnt}枚廃棄し敵${Math.min(cnt, enemies.length)}枚に-2！`, side);
+      }
+      break;
+    }
+    case 'chamber':
+      G.board[locIdx][side].forEach(c => { if (c.revealed && c.cost >= 5) c.permPowerMod += 2; });
+      p.hand.forEach(c => { if (c.cost >= 5) c.permPowerMod += 2; });
+      addLog(`🔥 チェンバー: 5コスト以上にパワー+2！`, side);
+      break;
+    case 'kid_omega':
+      p.kidOmegaPendingUid = card.uid;
+      break;
+    case 'fantomex':
+      if (p.discarded.length > 0 || (p.destroyedCount || 0) > 0) {
+        for (let i = 0; i < 3; i++) {
+          const front = G.board[i][opp].find(c => c.revealed);
+          if (front) front.permPowerMod -= 2;
+        }
+        addLog(`🔫 ファントメックス: 各前列の敵にパワー-2！`, side);
+      }
+      break;
+    case 'maverick':
+      p.maverickBonus += Math.max(0, getCardCurrentPower(card, locIdx, true));
+      break;
+    case 'jocasta':
+      G.board[locIdx][side].filter(c => c.uid !== card.uid && c.revealed && !c.silenced && hasActivateAbility(c) && c.id !== 'jocasta').forEach(a => {
+        triggerActivate(a, locIdx);
+      });
+      break;
+    case 'herbie': {
+      const mode = G.turn % 4;
+      if (mode === 0) { card.permPowerMod += 3; addLog(`🤖 H.E.R.B.I.E.: パワー+3！`, side); }
+      else if (mode === 1) { p.nextTurnEnergy += 1; addLog(`🤖 H.E.R.B.I.E.: 次ターンエネルギー+1！`, side); }
+      else if (mode === 2) { drawCard(side); }
+      else { G.board[locIdx][side].forEach(c => { if (c.uid !== card.uid && c.revealed) c.permPowerMod += 1; }); }
+      break;
+    }
+    case 'arana':
+      p.aranaPending = true;
+      break;
+    case 'black_swan':
+      p.blackSwanUntilTurn = G.turn + 1;
+      addLog(`🦢 ブラック・スワン: 次ターン終了まで1コストがコスト0！`, side);
+      break;
+    case 'boomerang':
+      if (p.hand.length < 7) {
+        G.board[locIdx][side] = G.board[locIdx][side].filter(c => c.uid !== card.uid);
+        card.revealed = false; card.activatedUsed = false;
+        if (G.players[opp].hand.length > 0) {
+          const tgt = G.players[opp].hand[Math.floor(Math.random() * G.players[opp].hand.length)];
+          tgt.permPowerMod -= 4; card.permPowerMod += 4;
+        }
+        p.hand.push(card);
+        addLog(`🪃 ブーメラン: 相手手札からパワー4奪取して手札に戻った！`, side);
+      }
+      break;
+    case 'fenris_wolf': {
+      const pool = [
+        ...G.destroyedPool.filter(x => x.owner === opp).map(x => ({ id: x.id, pwr: x.powerAtDestroy })),
+        ...G.players[opp].discarded.map(x => ({ id: x.id, pwr: getHandOrDeckCardPower(x) }))
+      ];
+      if (pool.length > 0 && G.board[locIdx][side].length < 4) {
+        pool.sort((a, b) => b.pwr - a.pwr);
+        const rev = makeCardInstance(pool[0].id, side, true); rev.revealed = true; stampLanded(rev);
+        G.board[locIdx][side].push(rev);
+        triggerOnReveal(rev, locIdx, true);
+        addLog(`🐺 フェンリス・ウルフ: 敵の「${rev.name}」を復活！`, side);
+      }
+      break;
+    }
+    case 'magus': {
+      const match = p.deck.find(c => c.cost === p.energy && c.kw.includes('onReveal'));
+      if (match) {
+        card.copiedOnRevealId = match.id;
+        triggerOnReveal(card, locIdx, true);
+        addLog(`✨ メイガス: 「${match.name}」の公開時をコピー！`, side);
+      }
+      break;
+    }
+    case 'scarlet_spider': {
+      const open = [0, 1, 2].filter(i => i !== locIdx && G.board[i][side].length < 4);
+      if (open.length > 0) {
+        const dest = open[Math.floor(Math.random() * open.length)];
+        const cl = makeCardInstance('scarlet_spider', side, true);
+        cl.basePower = getCardCurrentPower(card, locIdx, false);
+        cl.revealed = true; cl.activatedUsed = true; stampLanded(cl);
+        G.board[dest][side].push(cl);
+        addLog(`🕷️ スカーレット・スパイダー: クローン生成！`, side);
+      }
+      break;
+    }
+    case 'sparky': {
+      const lm = findBoardCardByUid(p.lastMovedUid);
+      if (lm && p.lastMovedFromIdx !== -1 && G.board[p.lastMovedFromIdx][side].length < 4) {
+        const cur = findBoardLocIdx(lm.uid);
+        lm.permPowerMod += 2;
+        if (cur !== p.lastMovedFromIdx) moveCard(lm, cur, p.lastMovedFromIdx);
+        addLog(`🐕 スパーキー: 「${lm.name}」を+2して元に戻した！`, side);
+      }
+      break;
+    }
+    case 'warlock': {
+      const e = Math.max(0, p.energy);
+      for (let k = 0; k < e && p.hand.length > 0; k++) {
+        const tgt = p.hand[Math.floor(Math.random() * p.hand.length)];
+        if (tgt.cost > 0) tgt.cost -= 1;
+      }
+      addLog(`✨ ウォーロック: 手札のコストを合計-${e}！`, side);
+      break;
     }
   }
 }
@@ -4154,33 +4748,128 @@ function destroyCard(card, locIdx, sourceName) {
   if (isLocActive(loc) && loc.id === 'wakanda') return false;
   if (hasCardOnBoard('you', 'armor', locIdx) || hasCardOnBoard('cpu', 'armor', locIdx) || card.id === 'colossus') return false;
   const side = card.owner;
+  const opp = side === 'you' ? 'cpu' : 'you';
+  if ((card.cost === 1 || card.cost === 6) && hasCardOnBoard(side, 'caiera')) return false;
   const idx = G.board[locIdx][side].findIndex(c => c.uid === card.uid);
   if (idx === -1) return false;
   const pwr = getCardCurrentPower(card, locIdx, false);
   G.board[locIdx][side].splice(idx, 1);
   G.totalDestroyed++;
   G.destroyedPowerTotal += Math.max(0, pwr);
-  G.destroyedPool.push({ uid: card.uid, id: card.id, name: card.name, cost: card.cost, powerAtDestroy: pwr, owner: side, card });
+  G.players[side].destroyedCount = (G.players[side].destroyedCount || 0) + 1;
+  if (G.players[side].destroyedLocs) G.players[side].destroyedLocs[locIdx] = true;
+  G.destroyedPool.push({ uid: card.uid, id: card.id, name: card.name, cost: card.cost, powerAtDestroy: pwr, owner: side, destroyedTurn: G.turn, card });
   playSfx('destroy');
   addLog(`💥 ${sourceName}: 「${card.name}」破壊！`, side);
   spawnVfx('destroy', `[data-loc-drop="${locIdx}"]`, `💥 ${card.name} 破壊!`);
 
-  if (card.id === 'nova' && !card.silenced) {
-    for (let i = 0; i < 3; i++) G.board[i][side].forEach(c => { if (c.revealed) c.permPowerMod += 1; });
-  } else if (card.id === 'bucky_barnes' && !card.silenced) {
-    const ws = makeCardInstance('winter_soldier', side, true); ws.revealed = true; G.board[locIdx][side].push(ws);
-  } else if (card.id === 'wolverine' && !card.silenced) {
-    const open = [0,1,2].filter(i => G.board[i][side].length < 4);
-    if (open.length > 0) {
-      const wv = makeCardInstance('wolverine', side, true); wv.basePower = card.basePower + card.permPowerMod + 2; wv.revealed = true;
-      G.board[open[Math.floor(Math.random()*open.length)]][side].push(wv);
+  if (!card.silenced) {
+    if (card.id === 'nova') {
+      for (let i = 0; i < 3; i++) G.board[i][side].forEach(c => { if (c.revealed) c.permPowerMod += 1; });
+    } else if (card.id === 'bucky_barnes') {
+      const ws = makeCardInstance('winter_soldier', side, true); ws.revealed = true; stampLanded(ws); G.board[locIdx][side].push(ws);
+    } else if (card.id === 'uncle_ben') {
+      const sp = makeCardInstance('spider_man', side, true); sp.revealed = true; stampLanded(sp); G.board[locIdx][side].push(sp);
+      addLog(`🕷️ ベンおじさん: スパイダーマンが出現！`, side);
+    } else if (card.id === 'wolverine') {
+      const open = [0,1,2].filter(i => G.board[i][side].length < 4);
+      if (open.length > 0) {
+        const wv = makeCardInstance('wolverine', side, true); wv.basePower = card.basePower + card.permPowerMod + 2; wv.revealed = true; stampLanded(wv);
+        G.board[open[Math.floor(Math.random()*open.length)]][side].push(wv);
+      }
+    } else if (card.id === 'x_23') {
+      const open = [0,1,2].filter(i => G.board[i][side].length < 4);
+      if (open.length > 0) {
+        const x23 = makeCardInstance('x_23', side, true); x23.revealed = true; stampLanded(x23);
+        G.board[open[Math.floor(Math.random()*open.length)]][side].push(x23);
+      }
+      G.players[side].nextTurnEnergy += 1;
+      addLog(`⚡ X-23: 再生＆次ターンエネルギー+1！`, side);
+    } else if (card.id === 'deadpool' && G.players[side].hand.length < 7) {
+      const dp = makeCardInstance('deadpool', side, true);
+      dp.basePower = (card.basePower + card.permPowerMod) * 2;
+      G.players[side].hand.push(dp);
+    } else if (card.id === 'sabretooth' && G.players[side].hand.length < 7) {
+      const st = makeCardInstance('sabretooth', side, true);
+      st.cost = 0; st.basePower = card.basePower; st.permPowerMod = card.permPowerMod;
+      G.players[side].hand.push(st);
+      addLog(`🐯 セイバートゥース: コスト0で手札に戻った！`, side);
+    } else if (card.id === 'headpool' && G.players[side].hand.length < 7) {
+      G.players[side].hand.forEach(hc => { hc.permPowerMod += 1; });
+      const hp = makeCardInstance('headpool', side, true);
+      G.players[side].hand.push(hp);
+      addLog(`💀 ヘッドプール: 手札に戻り全手札+1！`, side);
+    } else if (card.id === 'moira_x') {
+      for (let k = 0; k < 2 && G.players[side].hand.length < 7 && G.players[side].deck.length > 0; k++) {
+        const src = G.players[side].deck[Math.floor(Math.random() * G.players[side].deck.length)];
+        G.players[side].hand.push(makeCardInstance(src.id, side, true));
+      }
+      addLog(`🧬 モイラX: カードのコピーを手札に加えた！`, side);
+    } else if (card.id === 'marrow') {
+      const enemies = [];
+      for (let i = 0; i < 3; i++) G.board[i][opp].forEach(c => { if (c.revealed) enemies.push(c); });
+      if (enemies.length > 0) {
+        for (let k = 0; k < 7; k++) enemies[Math.floor(Math.random() * enemies.length)].permPowerMod -= 1;
+        addLog(`🦴 マロウ: 敵に合計-7パワー！`, side);
+      }
+    } else if (card.id === 'zombie_nova') {
+      addHorde(side, 3, locIdx);
+    } else if (card.id === 'wade_wilson') {
+      const c1h = G.players[side].hand.findIndex(c => c.cost === 1);
+      const c1d = G.players[side].deck.findIndex(c => c.cost === 1);
+      let rep = null;
+      if (c1h !== -1) rep = G.players[side].hand.splice(c1h, 1)[0];
+      else if (c1d !== -1) rep = G.players[side].deck.splice(c1d, 1)[0];
+      if (rep && G.board[locIdx][side].length < 4) {
+        rep.permPowerMod += 2; rep.revealed = true; stampLanded(rep);
+        G.board[locIdx][side].push(rep);
+        triggerOnReveal(rep, locIdx, true);
+      }
+    } else if (card.id === 'air_walker') {
+      const c4h = G.players[side].hand.findIndex(c => c.cost === 4);
+      const c4d = G.players[side].deck.findIndex(c => c.cost === 4);
+      let rep = null;
+      if (c4h !== -1) rep = G.players[side].hand.splice(c4h, 1)[0];
+      else if (c4d !== -1) rep = G.players[side].deck.splice(c4d, 1)[0];
+      if (rep && G.board[locIdx][side].length < 4) {
+        rep.revealed = true; stampLanded(rep);
+        G.board[locIdx][side].push(rep);
+        triggerOnReveal(rep, locIdx, true);
+      }
+    } else if (card.id === 'nimrod') {
+      for (let i = 0; i < 3; i++) if (i !== locIdx && G.board[i][side].length < 4) G.board[i][side].push(cloneBoardCard(card));
     }
-  } else if (card.id === 'deadpool' && !card.silenced && G.players[side].hand.length < 7) {
-    const dp = makeCardInstance('deadpool', side, true);
-    dp.basePower = (card.basePower + card.permPowerMod) * 2;
-    G.players[side].hand.push(dp);
-  } else if (card.id === 'nimrod' && !card.silenced) {
-    for (let i = 0; i < 3; i++) if (i !== locIdx && G.board[i][side].length < 4) G.board[i][side].push(cloneBoardCard(card));
+  }
+
+  // 破壊連動効果: ウルヴァリン(WX), エンジェル, ファイアヘアー, デス・アークエンジェル
+  for (let i = 0; i < 3; i++) ['you', 'cpu'].forEach(s => {
+    G.board[i][s].forEach(wc => { if (wc.revealed && !wc.silenced && wc.id === 'wolverine_wx') wc.permPowerMod += 1; });
+  });
+  if (hasCardOnBoard(side, 'firehair') && !card.silenced && card.kw.includes('onReveal')) {
+    triggerOnReveal(card, locIdx, true);
+  }
+  if (G.board[locIdx][side].length < 4) {
+    const p = G.players[side];
+    let angIdx = p.hand.findIndex(c => c.id === 'angel' && !c.silenced);
+    let ang = angIdx !== -1 ? p.hand.splice(angIdx, 1)[0] : null;
+    if (!ang) {
+      angIdx = p.deck.findIndex(c => c.id === 'angel' && !c.silenced);
+      if (angIdx !== -1) ang = p.deck.splice(angIdx, 1)[0];
+    }
+    if (ang) {
+      ang.revealed = true; stampLanded(ang); G.board[locIdx][side].push(ang);
+      addLog(`🪽 エンジェルが破壊を察知して飛び出した！`, side);
+    }
+  }
+  if (G.players[side].destroyedCount === 4) {
+    const p = G.players[side];
+    let adIdx = p.hand.findIndex(c => c.id === 'archangel_death');
+    let ad = adIdx !== -1 ? p.hand.splice(adIdx, 1)[0] : null;
+    if (!ad) { adIdx = p.deck.findIndex(c => c.id === 'archangel_death'); if (adIdx !== -1) ad = p.deck.splice(adIdx, 1)[0]; }
+    if (ad && G.board[locIdx][side].length < 4) {
+      ad.permPowerMod += 5; ad.revealed = true; stampLanded(ad); G.board[locIdx][side].push(ad);
+      addLog(`🦇 デス・アークエンジェル: 目標達成で+5復活！`, side);
+    }
   }
   return true;
 }
@@ -4194,7 +4883,7 @@ function isCardMovable(card, locIdx, side) {
   if (hasCardOnBoard('you', 'professor_x', locIdx) || hasCardOnBoard('cpu', 'professor_x', locIdx)) {
     if (card.id !== 'jeff') return false;
   }
-  if (card.id === 'vision') return true;
+  if (card.id === 'vision' || card.phoenixMovable) return true;
   if (card.id === 'nightcrawler' || card.id === 'jeff' || card.id === 'rocket_groot' || card.id === 'nocturne' || card.id === 'mercury') {
     return !card.movedUsed;
   }
@@ -4269,6 +4958,8 @@ function moveCard(card, fromIdx, toIdx) {
   if (idx === -1) return false;
   G.board[fromIdx][side].splice(idx, 1);
   G.board[toIdx][side].push(card);
+  G.players[side].lastMovedUid = card.uid;
+  G.players[side].lastMovedFromIdx = fromIdx;
   applyMoveEffects(card, fromIdx, toIdx);
   return true;
 }
@@ -4657,17 +5348,20 @@ function renderBattle(revealingUid = null) {
       if (!c) return '<div class="card-slot"></div>';
       const isPending = G.players.you.pendingPlays.some(p => p.uid === c.uid);
       const isPendingMove = G.players.you.pendingMoves.some(m => m.uid === c.uid);
+      const isPendingAct = G.players.you.pendingActivates.some(a => a.uid === c.uid);
+      const isActReady = canActivateCard(c, 'you') && !isPendingAct;
       const isMovable = !isPending && (isPendingMove || isCardMovable(c, idx, 'you'));
       const curP = c.revealed ? getCardCurrentPower(c, idx, true) : getHandOrDeckCardPower(c);
       const pCls = curP > c.basePower ? 'buffed' : curP < c.basePower ? 'nerfed' : '';
+      const tagText = isPending ? '待機中' : isPendingAct ? '⚡有効化予定' : isPendingMove ? '💨移動予定' : c.hiddenByIW ? '🫥伏せ' : (c.mysterioHidden ? '🎭偽装' : (isActReady ? '⚡有効化可' : (c.activatedUsed ? '有効化済' : c.kwLabel)));
       return `
         <div class="card-slot">
-          <div class="board-card you-card ${c.img ? 'has-art' : ''} ${c.uid === revealingUid ? 'revealing' : ''}"
+          <div class="board-card you-card ${c.img ? 'has-art' : ''} ${isPendingAct ? 'activate-pending' : (isActReady ? 'activate-ready' : '')} ${c.uid === revealingUid ? 'revealing' : ''}"
                style="${getComicBg(c)}"
                data-uid="${c.uid}" data-loc="${idx}" data-pending="${isPending}" data-movable="${isMovable}">
             <div class="bc-header"><span class="badge-power ${pCls}">${curP}</span></div>
             <div class="bc-name">${c.name}</div>
-            <div class="bc-tag">${isPending ? '待機中' : isPendingMove ? '💨移動予定' : c.hiddenByIW ? '🫥伏せ' : (c.mysterioHidden ? '🎭偽装' : c.kwLabel)}</div>
+            <div class="bc-tag">${tagText}</div>
           </div>
         </div>
       `;
@@ -4757,6 +5451,19 @@ document.getElementById('modal-backdrop').addEventListener('click', e => { if (e
 function showCardModal(c, where = 'board') {
   const pwr = where === 'hand' ? getHandOrDeckCardPower(c) : (c.revealed ? getCardCurrentPower(c, findBoardLocIdx(c.uid), true) : getHandOrDeckCardPower(c));
   const cst = where === 'hand' && G ? getEffectiveCost(c, 'you') : c.cost;
+  let actBtnHtml = '';
+  if (where === 'board' && G && c.owner === 'you' && c.revealed && hasActivateAbility(c)) {
+    const isPendingAct = G.players.you.pendingActivates.some(a => a.uid === c.uid);
+    if (c.activatedUsed) {
+      actBtnHtml = `<button class="hex-action-btn" style="background:#334155;color:#94a3b8;" disabled>✓ 有効化済み (ACTIVATED)</button>`;
+    } else if (isPendingAct) {
+      actBtnHtml = `<button class="hex-action-btn remove" onclick="toggleActivateCard('${c.uid}')">↩️ 有効化を取り消す</button>`;
+    } else if (canActivateCard(c, 'you')) {
+      actBtnHtml = `<button class="hex-action-btn activate" onclick="toggleActivateCard('${c.uid}')">⚡ 有効化する (ACTIVATE)</button>`;
+    } else {
+      actBtnHtml = `<button class="hex-action-btn" style="background:#334155;color:#94a3b8;" disabled>⏳ 有効化できません</button>`;
+    }
+  }
   openModal(`
     <div class="snap-zoom-wrap">
       <div class="snap-zoom-series">${c.kwLabel}</div>
@@ -4768,6 +5475,7 @@ function showCardModal(c, where = 'board') {
         <div class="z-title">${c.name}</div>
       </div>
       <p style="font-size:0.86rem;line-height:1.5;color:#f1f5f9;">${c.desc}</p>
+      ${actBtnHtml}
       <button class="hex-close-btn" onclick="closeModal()">✕</button>
     </div>
   `);
@@ -4958,6 +5666,7 @@ function handleRoomMsg(msg) {
     if (msg.turn !== G.turn) return;
     G.players.cpu.turnReady = true;
     G.players.cpu.committedPlays = msg.plays || [];
+    G.players.cpu.committedActivates = msg.activates || [];
     addLog(`🌐 ${G.oppName} がターン終了しました！`, 'cpu');
     if (G.players.you.turnReady && G.phase === 'planning') {
       executeResolveTurn();
